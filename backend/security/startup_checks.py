@@ -22,12 +22,18 @@ def _check_password_configured(sec: SecurityConfig) -> None:
     if not sec.is_production():
         return
     from common.config import load_config
+    from backend.security.auth_db import get_stored_password_hash
+
+    # Check both legacy config and new auth DB
     cfg = load_config()
-    if not cfg.get("password_hash"):
+    has_legacy = bool(cfg.get("password_hash"))
+    has_auth = bool(get_stored_password_hash())
+
+    if not has_legacy and not has_auth:
         raise StartupCheckFailed(
             "APP_ENV=production but no admin password is set. "
             "Use the control panel or CLI to set a password first, "
-            "or set ALLOW_INSECURE_NO_PASSWORD=true to explicitly "
+            "or set ALLOW_INSECURE_NO_PASSWORD=*** to explicitly "
             "accept the risk (NOT recommended)."
         )
 

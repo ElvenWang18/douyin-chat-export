@@ -8,7 +8,6 @@ services:
       - ALL
     pids_limit: 256
     init: true
-    # 仅本地映射，由 Caddy 反代提供 HTTPS
     ports:
       - "127.0.0.1:8000:8000"
     volumes:
@@ -16,29 +15,17 @@ services:
     environment:
       - TZ=Asia/Shanghai
       - APP_ENV=production
-      - MODE=all                    # web | scraper | all
-      - HEADLESS=true               # true for Docker (no display)
-      - SCRAPER_INCREMENTAL=true    # incremental by default
-      - SCRAPER_FILTER=             # empty = all conversations
-      - SCRAPER_SCHEDULE=           # cron expr, e.g. "0 */6 * * *" (empty = no schedule)
-      - COOKIE_SECURE=true          # Caddy 提供 HTTPS
+      - MODE=all
+      - HEADLESS=true
+      - SCRAPER_INCREMENTAL=true
+      - SCRAPER_FILTER=
+      - SCRAPER_SCHEDULE=
+      - COOKIE_SECURE=true
       - TRUSTED_PROXY_CIDRS=127.0.0.1/32,::1/128
-      # Security — 生成强密钥:
-      # APP_SECRET_KEY=*** -c "import secrets; print(secrets.token_hex(32))")
-      # ENABLE_REMOTE_LOGIN=false
-      # ENABLE_COOKIE_IMPORT=false
-      # ENABLE_SERVERCHAN=false
     restart: unless-stopped
-    networks:
-      - web-internal
-    # Health check
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 30s
-
-networks:
-  web-internal:
-    external: true
