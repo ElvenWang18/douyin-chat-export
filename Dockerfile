@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Create non-root user ──────────────────────────────────────
+RUN useradd --system --uid 10001 --create-home appuser
+
 WORKDIR /app
 
 # Python dependencies
@@ -39,12 +42,22 @@ RUN chmod +x docker-entrypoint.sh
 # Built frontend from stage 1
 COPY --from=frontend-builder /app/frontend/dist frontend/dist
 
+# Create data directories with correct ownership
+RUN mkdir -p /app/data/auth /app/data/database /app/data/browser_profile \
+    /app/data/media /app/data/exports /app/data/logs \
+    && chown -R appuser:appuser /app
+
+# Switch to non-root
+USER appuser
+
 # Environment defaults
-ENV MODE=all \
+ENV APP_ENV=production \
+    MODE=all \
     HEADLESS=true \
     SCRAPER_INCREMENTAL=true \
     SCRAPER_FILTER="" \
     SCRAPER_SCHEDULE="" \
+    COOKIE_SECURE=false \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000

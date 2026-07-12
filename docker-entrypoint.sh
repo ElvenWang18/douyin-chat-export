@@ -14,10 +14,28 @@ cleanup() {
 }
 trap cleanup SIGTERM SIGINT
 
-# Ensure DB schema exists
+# Migrate legacy paths (data/chat.db -> data/database/chat.db, etc.)
+echo "[entrypoint] Running path migration..."
+python -c "
+from common.paths import migrate_legacy_paths
+msgs = migrate_legacy_paths()
+for m in msgs: print(f'  {m}')
+"
+
+# Ensure all directories exist
+mkdir -p /app/data/auth /app/data/database /app/data/browser_profile \
+         /app/data/media /app/data/exports /app/data/logs
+
+# Ensure DB schema exists (common.db uses DB_PATH which points to data/database/chat.db)
 python -c "from extractor.models import init_db; init_db()"
 
-echo "[entrypoint] MODE=$MODE"
+echo "[entrypoint] MODE=$MODE APP_ENV=${APP_ENV:-development}"
+
+# Generate app secret key if not set
+if [ -z "$APP_SECRET_KEY" ] && [ -z "$APP_SECRET_KEY_FILE" ]; then
+    export APP_SECRET_KEY=$(python -c "import secrets; print(secrets.token_hex(32))")
+    echo "[entrypoint] Auto-generated APP_SECRET_KEY"
+fi
 
 # Start web server
 if [ "$MODE" = "web" ] || [ "$MODE" = "all" ]; then
@@ -51,8 +69,6 @@ if [ "$MODE" = "scraper" ] || [ "$MODE" = "all" ]; then
             echo "[entrypoint] Scraper finished."
             exit 0
         fi
-        # MODE=all without schedule: just start web, no auto-scrape
-        # (scraping can be triggered from control panel)
     fi
 fi
 

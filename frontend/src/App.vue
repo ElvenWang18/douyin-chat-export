@@ -9,20 +9,21 @@ const searchHighlight = ref('')
 const jumpToSeq = ref(null)
 const sidebarOpen = ref(false)
 
-// Auth
+// Auth — session-based (no localStorage tokens)
 const authChecking = ref(true)
 const authenticated = ref(false)
+const csrfToken = ref('')
 const loginPassword = ref('')
+const loginRemember = ref(false)
 const loginError = ref('')
-const authToken = ref(localStorage.getItem('authToken') || '')
 
 async function checkAuth() {
   try {
-    const headers = authToken.value ? { Authorization: `Bearer ${authToken.value}` } : {}
-    const res = await fetch('/api/auth/check', { headers })
+    const res = await fetch('/api/auth/session', { credentials: 'same-origin' })
     const data = await res.json()
-    if (!data.need_password || data.authenticated) {
+    if (data.authenticated) {
       authenticated.value = true
+      csrfToken.value = data.csrf_token || ''
     }
   } catch {}
   authChecking.value = false
@@ -33,31 +34,52 @@ async function doLogin() {
   try {
     const res = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: loginPassword.value }),
+      body: JSON.stringify({
+        password: loginPassword.value,
+        remember: loginRemember.value,
+      }),
     })
     if (!res.ok) {
-      loginError.value = '密码错误'
+      const data = await res.json()
+      loginError.value = data.detail || '密码错误'
       return
     }
     const data = await res.json()
-    authToken.value = data.token
-    localStorage.setItem('authToken', data.token)
+    csrfToken.value = data.csrf_token || ''
     authenticated.value = true
+    loginPassword.value = ''
   } catch {
     loginError.value = '登录失败'
   }
 }
 
-// Inject auth token into all fetch requests
+async function doLogout() {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': csrfToken.value },
+    })
+  } catch {}
+  authenticated.value = false
+  csrfToken.value = ''
+}
+
+// Inject CSRF token into all mutating requests
 const _origFetch = window.fetch
 window.fetch = function(url, opts = {}) {
-  if (authToken.value && typeof url === 'string' && url.startsWith('/api/')) {
-    opts.headers = opts.headers || {}
-    if (opts.headers instanceof Headers) {
-      opts.headers.set('Authorization', `Bearer ${authToken.value}`)
-    } else {
-      opts.headers['Authorization'] = `Bearer ${authToken.value}`
+  if (csrfToken.value && typeof url === 'string' && url.startsWith('/api/')) {
+    opts.credentials = opts.credentials || 'same-origin'
+    const method = (opts.method || 'GET').toUpperCase()
+    if (method !== 'GET' && method !== 'HEAD') {
+      if (opts.headers instanceof Headers) {
+        opts.headers.set('X-CSRF-Token', csrfToken.value)
+      } else {
+        opts.headers = opts.headers || {}
+        opts.headers['X-CSRF-Token'] = csrfToken.value
+      }
     }
   }
   return _origFetch.call(this, url, opts)
@@ -123,6 +145,10 @@ function navigateToMessage(item) {
           class="login-input"
           autofocus
         />
+        <div class="login-remember">
+          <input type="checkbox" id="remember" v-model="loginRemember" />
+          <label for="remember">保持登录</label>
+        </div>
         <button type="submit" class="login-btn">登录</button>
       </form>
       <div v-if="loginError" class="login-error">{{ loginError }}</div>
@@ -154,6 +180,7 @@ function navigateToMessage(item) {
             @click="applyTheme(t.id)"
           />
         </div>
+        <button class="logout-btn" @click="doLogout" title="退出登录">⏻</button>
       </div>
       <MessageList
         :conversation="activeConversation"
@@ -210,6 +237,14 @@ function navigateToMessage(item) {
 .login-input:focus {
   border-color: var(--accent);
 }
+.login-remember {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
 .login-btn {
   padding: 10px;
   border: none;
@@ -232,6 +267,21 @@ function navigateToMessage(item) {
 .login-loading {
   color: var(--text-muted);
   font-size: 14px;
+}
+
+.logout-btn {
+  background: none;
+  border: 1px solid var(--border-color);
+  color: var(--text-muted);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 10px;
+  border-radius: 6px;
+  margin-left: auto;
+}
+.logout-btn:hover {
+  color: var(--text-primary);
+  border-color: var(--text-muted);
 }
 
 .app-layout {

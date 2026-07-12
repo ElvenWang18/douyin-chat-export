@@ -1,11 +1,15 @@
-"""Control panel for managing scraper, viewer, and export."""
+"""Control panel for managing scraper, viewer, and export.
+
+Security-v2: Uses session-based auth, CSRF protection,
+admin network restriction, and recent-reauth for sensitive ops.
+"""
 import asyncio
 import json
 import os
 import sys
 import time
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Request, Depends
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse
 from pydantic import BaseModel
 
@@ -13,6 +17,9 @@ from backend import database
 from common import config as _cfg, paths
 from backend.panel import notify as _notify
 from backend.panel.scheduler import parse_cron as _parse_cron, next_cron_run as _next_cron_run
+from backend.security.dependencies import (
+    require_session, require_admin_network, require_recent_auth, require_csrf,
+)
 
 control_router = APIRouter(prefix="/panel")
 
@@ -154,16 +161,26 @@ class SelectedUpdate(BaseModel):
 
 
 @control_router.post("/api/password")
-async def set_password(req: PasswordRequest):
-    import hashlib
+async def set_password(req: PasswordRequest,
+                        session: dict = Depends(require_session),
+                        _csrf=Depends(require_csrf)):
+    from backend.security.passwords import hash_password
+    from backend.security.auth_db import set_stored_password_hash, clear_stored_password
+    from backend.security.sessions import revoke_all_other_sessions
     cfg = _load_config()
     if req.password:
-        cfg["password_hash"] = hashlib.sha256(req.password.encode()).hexdigest()
+        new_hash = hash_password(req.password)
+        set_stored_password_hash(new_hash)
+        # Remove legacy SHA-256 hash if present
+        cfg.pop("password_hash", None)
         _save_config(cfg)
+        # Revoke all other sessions on password change
+        revoke_all_other_sessions(session["id"])
         return {"status": "ok", "message": "密码已设置"}
     else:
         cfg.pop("password_hash", None)
         _save_config(cfg)
+        clear_stored_password()
         return {"status": "ok", "message": "密码已清除"}
 
 
@@ -186,7 +203,7 @@ _notify_on_failure = _notify.notify_on_failure
 
 
 @control_router.post("/api/notify/serverchan")
-async def set_notify_key(req: NotifyKeyRequest):
+async def set_notify_key(req: NotifyKeyRequest, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     cfg = _load_config()
     key = req.sendkey.strip()
     if key:
@@ -205,7 +222,7 @@ async def notify_status():
 
 
 @control_router.post("/api/notify/test")
-async def notify_test():
+async def notify_test(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     cfg = _load_config()
     sendkey = (cfg.get("notify_serverchan_key") or "").strip()
     if not sendkey:
@@ -233,7 +250,7 @@ async def get_download_images():
 
 
 @control_router.post("/api/config/download-images")
-async def set_download_images(req: DownloadImagesToggle):
+async def set_download_images(req: DownloadImagesToggle, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     cfg = _load_config()
     cfg["download_images"] = bool(req.enabled)
     _save_config(cfg)
@@ -255,7 +272,7 @@ async def backfill_status():
 
 
 @control_router.post("/api/media/backfill")
-async def backfill_start():
+async def backfill_start(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     if _backfill_state["status"] == "running":
         return JSONResponse({"error": "Backfill already running"}, status_code=409)
     # Mark running synchronously before spawning so two rapid POSTs can't both
@@ -369,7 +386,7 @@ async def video_backfill_pending():
 
 
 @control_router.post("/api/media/videos/backfill")
-async def video_backfill_start():
+async def video_backfill_start(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     if _video_backfill_state["status"] == "running":
         return JSONResponse({"error": "video backfill already running"}, status_code=409)
     # Mark running synchronously before spawning to avoid the check-then-act race.
@@ -421,7 +438,7 @@ async def panel_page():
 
 
 @control_router.get("/api/status")
-async def panel_status():
+async def panel_status(session: dict = Depends(require_session)):
     stats = database.get_stats()
     from backend.database import get_db
     conn = get_db()
@@ -459,7 +476,7 @@ async def panel_status():
 
 
 @control_router.post("/api/scrape")
-async def start_scrape(req: ScrapeRequest):
+async def start_scrape(req: ScrapeRequest, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     if _scrape_state["status"] == "running":
         return JSONResponse({"error": "Scrape already running"}, status_code=409)
 
@@ -568,7 +585,7 @@ async def discover_log(lines: int = 80):
 
 
 @control_router.post("/api/scrape/stop")
-async def stop_scrape():
+async def stop_scrape(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     proc = _scrape_state.get("process")
     if proc and proc.returncode is None:
         _scrape_state["stopped"] = True  # tell _run_scrape this was intentional
@@ -580,7 +597,7 @@ async def stop_scrape():
 
 
 @control_router.post("/api/custom-filter")
-async def manage_custom_filter(req: CustomFilterAction):
+async def manage_custom_filter(req: CustomFilterAction, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     cfg = _load_config()
     filters = cfg.get("custom_filters", [])
     if req.action == "add" and req.value and req.value not in filters:
@@ -659,7 +676,7 @@ async def _probe_login_state() -> dict:
 
 
 @control_router.post("/api/conversations/refresh")
-async def refresh_conversations():
+async def refresh_conversations(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     """Run a lightweight scrape that only enumerates the conversation list."""
     if _discover_state["status"] == "running":
         return JSONResponse({"error": "Refresh already running"}, status_code=409)
@@ -743,7 +760,7 @@ async def refresh_status():
 
 
 @control_router.post("/api/conversations/refresh/stop")
-async def refresh_stop():
+async def refresh_stop(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     proc = _discover_state.get("process")
     if proc and proc.returncode is None:
         proc.terminate()
@@ -770,7 +787,7 @@ async def get_selected():
 
 
 @control_router.post("/api/conversations/selected")
-async def set_selected(req: SelectedUpdate):
+async def set_selected(req: SelectedUpdate, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     if req.section not in ("scraper", "export", "schedule"):
         return JSONResponse({"error": "invalid section"}, status_code=400)
     cfg = _load_config()
@@ -780,7 +797,7 @@ async def set_selected(req: SelectedUpdate):
 
 
 @control_router.post("/api/schedule")
-async def set_schedule(req: ScheduleRequest):
+async def set_schedule(req: ScheduleRequest, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     # Cancel existing scheduled task
     if _scheduler_state["task"] and not _scheduler_state["task"].done():
         _scheduler_state["task"].cancel()
@@ -858,7 +875,9 @@ async def _cron_loop(parsed: list, incremental: bool):
 
 
 @control_router.post("/api/export")
-async def start_export(req: ExportRequest):
+async def start_export(req: ExportRequest,
+                       session: dict = Depends(require_session),
+                       _csrf=Depends(require_csrf)):
     if _export_state["status"] == "running":
         return JSONResponse({"error": "Export already running"}, status_code=409)
 
@@ -955,7 +974,7 @@ def _do_export(fmt: str, filter_name: str, conversations: list | None):
 
 
 @control_router.get("/api/export/download")
-async def download_export():
+async def download_export(session: dict = Depends(require_session)):
     if not _export_state["file_path"]:
         return JSONResponse({"error": "No export file"}, status_code=404)
     path = os.path.join(
@@ -989,7 +1008,7 @@ async def login_check():
 
 
 @control_router.post("/api/login/start")
-async def login_start():
+async def login_start(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     if _login_state["status"] in ("starting", "waiting_scan"):
         return JSONResponse({"error": "已在登录流程中"}, status_code=409)
     # If scraper is running, reject
@@ -1089,7 +1108,7 @@ async def login_keyboard(req: KeyAction):
 
 
 @control_router.post("/api/login/cancel")
-async def login_cancel():
+async def login_cancel(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     await _login_cleanup()
     _login_state["status"] = "idle"
     _login_state["message"] = "已取消"
@@ -1098,7 +1117,7 @@ async def login_cancel():
 
 
 @control_router.post("/api/login/clear")
-async def login_clear():
+async def login_clear(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     """Clear browser profile to force re-login."""
     import shutil
     if os.path.isdir(_USER_DATA_DIR):
@@ -1142,7 +1161,7 @@ def _validate_cookie_entries(parsed: list[dict]) -> tuple[list[str], list[str]]:
 
 
 @control_router.post("/api/login/cookie-import")
-async def login_cookie_import(req: CookieImportRequest):
+async def login_cookie_import(req: CookieImportRequest, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
     """Import cookies from browser DevTools or document.cookie string."""
     if _scrape_state["status"] == "running":
         return JSONResponse({"error": "采集进行中，请先停止"}, status_code=409)

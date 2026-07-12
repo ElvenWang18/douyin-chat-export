@@ -10,3 +10,15 @@ node_modules/
 CLAUDE.md
 TECHNICAL.md
 frontend/node_modules/
+# Sensitive: never commit auth database
+data/auth/
+data/auth.db
+*.db
+# Export artifacts
+data/exports/
+# Logs
+data/logs/
+# .env files
+.env
+.env.local
+.env.production

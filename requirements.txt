@@ -1,9 +1,10 @@
 playwright
 fastapi
-uvicorn
+uvicorn[standard]
 sqlalchemy
 aiosqlite
 httpx
 apscheduler
 cryptography
 pillow-heif
+argon2-cffi
