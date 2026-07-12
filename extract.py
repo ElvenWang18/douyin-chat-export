@@ -83,9 +83,8 @@ async def run():
             await scraper.run_discovery(duration=duration)
         elif args["mode"] == "list_conversations":
             convs = await scraper.list_conversations()
-            out_path = os.path.join(
-                os.path.dirname(__file__), "data", "conversations_list.json"
-            )
+            from common.paths import CONVERSATIONS_LIST as _cl
+            out_path = _cl
             os.makedirs(os.path.dirname(out_path), exist_ok=True)
             import json as _json
             import time as _time
