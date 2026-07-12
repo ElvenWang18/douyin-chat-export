@@ -351,6 +351,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px v
       <div class="nav-item" data-page="settings" onclick="showPage('settings')"><span class="ico">⚙</span><span data-i18n="navSettings">设置</span></div>
     </nav>
     <div class="side-foot">
+      <div class="nav-item" onclick="panelLogout()" style="color:var(--red);"><span class="ico">⏻</span>退出登录</div>
       <div class="lang-switcher">
         <button data-lang="zh" onclick="setLang('zh')">中</button>
         <button data-lang="en" onclick="setLang('en')">EN</button>
@@ -1512,28 +1513,18 @@ async function importCookie() {
   } finally { btn.disabled = false; }
 }
 
-/* ── Panel Auth ── */
-let panelToken = localStorage.getItem('panel_token') || '';
-
-function setCookie(name, val, days) {
-  const d = new Date(); d.setTime(d.getTime() + days*86400000);
-  document.cookie = name + '=' + val + ';expires=' + d.toUTCString() + ';path=/';
-}
+/* ── Panel Auth (v2: session cookies + CSRF) ── */
+let csrfToken = '';
 
 async function panelAuthCheck() {
   try {
-    const r = await fetch('/api/auth/check', {
-      headers: panelToken ? {'Authorization': 'Bearer ' + panelToken} : {}
-    });
+    const r = await fetch('/api/auth/session', { credentials: 'same-origin' });
     const d = await r.json();
-    if (!d.need_password || d.authenticated) {
-      // Authenticated or no password set
-      setCookie('auth_token', panelToken, 7);
+    if (d.authenticated) {
+      csrfToken = d.csrf_token || '';
       document.getElementById('loginOverlay').style.display = 'none';
       document.getElementById('mainContainer').style.display = '';
       checkLogin();
-      // Load selections + discovered conv list before loadStatus so checkboxes
-      // can render with correct prior state.
       await loadSelections();
       await loadDiscoveredConvs();
       loadDiscoverLog();
@@ -1550,7 +1541,12 @@ async function panelAuthCheck() {
       document.getElementById('mainContainer').style.display = 'none';
     }
   } catch(e) {
-    document.getElementById('loginOverlay').style.display = 'flex';
+    // API not available — assume no auth needed (dev mode)
+    document.getElementById('loginOverlay').style.display = 'none';
+    document.getElementById('mainContainer').style.display = '';
+    checkLogin();
+    loadStatus();
+    setInterval(loadStatus, 5000);
   }
 }
 
@@ -1560,37 +1556,58 @@ async function panelLogin() {
   try {
     const r = await fetch('/api/auth/login', {
       method: 'POST',
+      credentials: 'same-origin',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({password: pw})
+      body: JSON.stringify({password: pw, remember: false})
     });
-    const d = await r.json();
-    if (d.token) {
-      panelToken = d.token;
-      localStorage.setItem('panel_token', panelToken);
-      setCookie('auth_token', panelToken, 7);
-      document.getElementById('panelLoginErr').textContent = '';
-      panelAuthCheck();
-    } else {
+    if (!r.ok) {
       document.getElementById('panelLoginErr').textContent = t('wrongPassword');
+      return;
     }
+    const d = await r.json();
+    csrfToken = d.csrf_token || '';
+    document.getElementById('panelLoginErr').textContent = '';
+    panelAuthCheck();
   } catch(e) {
     document.getElementById('panelLoginErr').textContent = t('loginFailed');
   }
 }
 
-// Inject token cookie on every fetch for panel API calls
+async function panelLogout() {
+  try {
+    await fetch('/api/auth/logout', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: {'X-CSRF-Token': csrfToken}
+    });
+  } catch(e) {}
+  csrfToken = '';
+  document.getElementById('loginOverlay').style.display = 'flex';
+  document.getElementById('mainContainer').style.display = 'none';
+}
+
+// Inject CSRF token + credentials on every panel API fetch
 const _origFetch = window.fetch;
 window.fetch = function(url, opts) {
-  if (panelToken && typeof url === 'string' && url.startsWith('/panel/')) {
-    opts = opts || {};
-    opts.headers = opts.headers || {};
-    if (opts.headers instanceof Headers) {
-      if (!opts.headers.has('Authorization')) opts.headers.set('Authorization', 'Bearer ' + panelToken);
-    } else {
-      if (!opts.headers['Authorization']) opts.headers['Authorization'] = 'Bearer ' + panelToken;
+  opts = opts || {};
+  opts.credentials = 'same-origin';
+  if (typeof url === 'string' && url.startsWith('/panel/')) {
+    const method = ((opts.method) || 'GET').toUpperCase();
+    if (method !== 'GET' && method !== 'HEAD') {
+      opts.headers = opts.headers || {};
+      if (opts.headers instanceof Headers) {
+        if (!opts.headers.has('X-CSRF-Token') && !opts.headers.has('x-csrf-token'))
+          opts.headers.set('X-CSRF-Token', csrfToken);
+      } else {
+        if (!opts.headers['X-CSRF-Token'] && !opts.headers['x-csrf-token'])
+          opts.headers['X-CSRF-Token'] = csrfToken;
+      }
     }
   }
-  return _origFetch.call(this, url, opts);
+  return _origFetch.call(this, url, opts).then(r => {
+    if (r.status === 401) panelAuthCheck(); // Session expired
+    return r;
+  });
 };
 
 applyI18n();
