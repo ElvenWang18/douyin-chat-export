@@ -1104,13 +1104,16 @@ _login_state = {
 
 
 @control_router.get("/api/login/check")
-async def login_check():
+async def login_check(session: dict = Depends(require_session)):
     """Check login by actually opening browser and reading cookies."""
     return await _probe_login_state()
 
 
 @control_router.post("/api/login/start")
 async def login_start(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
+    from common.security_config import get_security_config
+    if not get_security_config().enable_remote_login:
+        return JSONResponse({"error": "远程扫码已禁用"}, status_code=404)
     if _login_state["status"] in ("starting", "waiting_scan"):
         return JSONResponse({"error": "已在登录流程中"}, status_code=409)
     # If scraper is running, reject
@@ -1220,7 +1223,10 @@ async def login_cancel(session: dict = Depends(require_session), _csrf=Depends(r
 
 @control_router.post("/api/login/clear")
 async def login_clear(session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
-    """Clear browser profile to force re-login."""
+    """Clear browser profile to force re-login. Requires re-auth."""
+    # Require recent re-auth for this destructive operation
+    if not session.get("elevated_until") or int(time.time()) > session["elevated_until"]:
+        return JSONResponse({"error": "需要重新验证密码"}, status_code=403)
     import shutil
     if os.path.isdir(_USER_DATA_DIR):
         shutil.rmtree(_USER_DATA_DIR, ignore_errors=True)
@@ -1264,6 +1270,9 @@ def _validate_cookie_entries(parsed: list[dict]) -> tuple[list[str], list[str]]:
 
 @control_router.post("/api/login/cookie-import")
 async def login_cookie_import(req: CookieImportRequest, session: dict = Depends(require_session), _csrf=Depends(require_csrf)):
+    from common.security_config import get_security_config
+    if not get_security_config().enable_cookie_import:
+        return JSONResponse({"error": "Cookie 导入已禁用"}, status_code=404)
     """Import cookies from browser DevTools or document.cookie string."""
     if _scrape_state["status"] == "running":
         return JSONResponse({"error": "采集进行中，请先停止"}, status_code=409)
@@ -1273,6 +1282,10 @@ async def login_cookie_import(req: CookieImportRequest, session: dict = Depends(
     raw = req.cookies.strip()
     if not raw:
         return JSONResponse({"error": "Cookie 数据为空"}, status_code=400)
+
+    # Limit request body size
+    if len(raw) > 256 * 1024:
+        return JSONResponse({"error": "Cookie 数据过大 (>256KB)"}, status_code=400)
 
     parsed: list[dict] = []
     try:
@@ -1323,6 +1336,10 @@ async def login_cookie_import(req: CookieImportRequest, session: dict = Depends(
 
     if not parsed:
         return JSONResponse({"error": "未能解析出任何 Cookie"}, status_code=400)
+
+    # Limit cookie count
+    if len(parsed) > 200:
+        return JSONResponse({"error": f"Cookie 数量过多 ({len(parsed)} > 200)"}, status_code=400)
 
     errors, warnings = _validate_cookie_entries(parsed)
     if errors:
