@@ -36,8 +36,10 @@ RUN pip install --no-cache-dir \
     -i https://pypi.tuna.tsinghua.edu.cn/simple \
     --trusted-host pypi.tuna.tsinghua.edu.cn \
     -r requirements.txt \
-    && PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ \
-       playwright install chromium
+    && PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
+       PLAYWRIGHT_DOWNLOAD_HOST=https://npmmirror.com/mirrors/playwright/ \
+       playwright install chromium \
+    && chown -R appuser:appuser /opt/playwright-browsers
 
 # Application source
 COPY extract.py export.py scheduler.py ./
@@ -66,6 +68,7 @@ ENV APP_ENV=production \
     SCRAPER_FILTER="" \
     SCRAPER_SCHEDULE="" \
     COOKIE_SECURE=false \
+    PLAYWRIGHT_BROWSERS_PATH=/opt/playwright-browsers \
     PYTHONUNBUFFERED=1
 
 EXPOSE 8000
