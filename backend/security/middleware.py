@@ -23,10 +23,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
             "Cache-Control": "no-store",
         }
 
-        # CSP: allow inline styles for the panel (legacy), restrict scripts
+        # CSP: inline scripts allowed temporarily for legacy panel HTML
+        # TODO: extract panel JS to external files and remove 'unsafe-inline'
         csp = (
             "default-src 'self'; "
-            "script-src 'self'; "
+            "script-src 'self' 'unsafe-inline'; "
             "style-src 'self' 'unsafe-inline'; "
             "img-src 'self' data: blob:; "
             "media-src 'self' blob:; "
