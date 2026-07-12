@@ -1,12 +1,13 @@
 """Server酱 (sct.ftqq.com) failure notifications for the control panel.
 
-Extracted from control_panel.py. send_serverchan_sync/build_failure_desp are
-pure/blocking; notify_on_failure is the fire-and-forget async wrapper that reads
-the sendkey from the shared panel config.
+Security-v2: No longer sends raw log tail contents.
+Only sends timestamp, error category, exit code, request_id, and local log path.
 """
+
 import asyncio
 import json
 import os
+import time
 
 from common import config
 
@@ -24,7 +25,6 @@ def send_serverchan_sync(sendkey: str, title: str, desp: str) -> tuple[bool, str
             body = resp.read().decode("utf-8", errors="replace")
             try:
                 payload = json.loads(body)
-                # Server酱 turbo returns {"code":0,...}; legacy returns {"errno":0,...}
                 code = payload.get("code", payload.get("errno", -1))
                 if code == 0:
                     return True, "已发送"
@@ -35,28 +35,43 @@ def send_serverchan_sync(sendkey: str, title: str, desp: str) -> tuple[bool, str
         return False, f"请求失败: {e}"
 
 
-def build_failure_desp(reason: str, log_path: str | None = None, tail: int = 20) -> str:
-    """Markdown body for failure notifications: timestamp, reason, last N log lines."""
+def build_failure_desp(reason: str, log_path: str | None = None) -> str:
+    """Build a privacy-safe notification body for failure notifications.
+    
+    Security: does NOT include log tail content.
+    Only includes: timestamp, error reason, and log file location.
+    """
     import datetime
+    import hashlib
     ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    request_id = hashlib.sha256(f"{ts}:{reason}".encode()).hexdigest()[:12]
+
     parts = [
         f"**失败时间**: {ts}",
         f"**原因**: {reason or '未知错误'}",
+        f"**追踪 ID**: req-{request_id}",
     ]
     if log_path and os.path.exists(log_path):
-        try:
-            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
-                lines = f.readlines()
-            log_excerpt = "".join(lines[-tail:]).rstrip()
-            if log_excerpt:
-                parts.append("**日志末尾**:\n```\n" + log_excerpt + "\n```")
-        except Exception:
-            pass
+        parts.append(f"**日志位置**: 容器内 `{log_path}`")
+    else:
+        parts.append("**日志位置**: 查看控制面板日志")
+
     return "\n\n".join(parts)
 
 
 async def notify_on_failure(title: str, desp: str) -> None:
-    """Fire-and-forget notification. Reads sendkey from config; silently no-ops if not set."""
+    """Fire-and-forget notification. Reads sendkey from config; silently no-ops if not set.
+    
+    Respects ENABLE_SERVERCHAN flag from security config.
+    """
+    try:
+        from common.security_config import get_security_config
+        sec = get_security_config()
+        if not sec.enable_serverchan:
+            return
+    except Exception:
+        pass
+
     cfg = config.load_config()
     sendkey = (cfg.get("notify_serverchan_key") or "").strip()
     if not sendkey:

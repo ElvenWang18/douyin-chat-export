@@ -53,6 +53,7 @@ _export_state = {
     "status": "idle",
     "file_path": None,
     "message": "",
+    "current_export_id": None,
 }
 
 # ── Scheduler state ──
@@ -105,6 +106,10 @@ async def restore_schedule_on_startup():
     """从 panel_config.json 恢复定时任务（容器重启后自动恢复）。"""
     cfg = _load_config()
     cron = cfg.get("schedule", "").strip()
+
+    # Start export cleanup loop
+    asyncio.create_task(_cleanup_expired_exports_loop())
+
     if not cron:
         return
     parsed = _parse_cron(cron)
@@ -881,33 +886,46 @@ async def start_export(req: ExportRequest,
     if _export_state["status"] == "running":
         return JSONResponse({"error": "Export already running"}, status_code=409)
 
-    _export_state["status"] = "running"
-    _export_state["message"] = "正在导出..."
-
     # Persist selection
     if req.conversations is not None:
         cfg = _load_config()
         cfg["export_selected"] = list(req.conversations)
         _save_config(cfg)
 
+    import uuid
+    export_id = uuid.uuid4().hex[:12]  # Short UUID for URLs
+    _export_state["status"] = "running"
+    _export_state["message"] = "正在导出..."
+    _export_state["current_export_id"] = export_id
+
     convs = list(req.conversations) if req.conversations else None
     loop = asyncio.get_event_loop()
-    await loop.run_in_executor(None, _do_export, req.format, req.filter, convs)
+    await loop.run_in_executor(None, _do_export, req.format, req.filter, convs, export_id)
+
+    if _export_state["status"] == "completed":
+        from backend.security.audit import log_audit
+        log_audit("EXPORT_CREATED", actor=session["id"], target_type="export")
+
     return {
         "status": _export_state["status"],
+        "id": export_id,
         "message": _export_state["message"],
-        "file_path": _export_state["file_path"],
     }
 
 
-def _do_export(fmt: str, filter_name: str, conversations: list | None):
+def _do_export(fmt: str, filter_name: str, conversations: list | None, export_id: str):
     try:
         from extractor.exporter import ChatLabExporter
         import re
         import zipfile
 
         ext = ".json" if fmt == "json" else ".jsonl"
-        data_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "data")
+        # Use UUID-named subdirectory inside exports/
+        export_dir = os.path.join(
+            os.path.dirname(os.path.dirname(__file__)), "data", "exports", export_id
+        )
+        os.makedirs(export_dir, exist_ok=True)
+        os.chmod(export_dir, 0o700)
 
         # Decide targets
         if conversations:
@@ -917,37 +935,26 @@ def _do_export(fmt: str, filter_name: str, conversations: list | None):
         else:
             targets = [None]  # None = exporter picks latest
 
+        file_name = f"payload{ext}"
+
         if len(targets) <= 1:
-            # Single file
-            output_path = os.path.join(data_dir, f"export{ext}")
-            # Remove stale file so a "conv not found" early-return doesn't look like success
+            output_path = os.path.join(export_dir, file_name)
             if os.path.exists(output_path):
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
+                os.remove(output_path)
             exporter = ChatLabExporter(conv_name=targets[0] or None, output_format=fmt)
             exporter.export(output_path)
             if not os.path.exists(output_path):
                 raise RuntimeError(f"未找到会话: {targets[0] or '(any)'}")
-            _export_state["file_path"] = f"export{ext}"
+            _export_state["file_path"] = os.path.join(export_id, file_name)
             size_mb = os.path.getsize(output_path) / (1024 * 1024)
             _export_state["message"] = f"导出完成 ({size_mb:.1f} MB)"
         else:
-            # Multiple → bundle into a zip
-            tmp_dir = os.path.join(data_dir, "export_tmp")
+            tmp_dir = os.path.join(export_dir, "tmp")
             os.makedirs(tmp_dir, exist_ok=True)
-            # Clear old tmp files
-            for fn in os.listdir(tmp_dir):
-                try:
-                    os.remove(os.path.join(tmp_dir, fn))
-                except Exception:
-                    pass
-
             produced = []
             for name in targets:
-                safe = re.sub(r"[^\w\u4e00-\u9fff.-]+", "_", name)[:80] or "conv"
-                path = os.path.join(tmp_dir, f"{safe}{ext}")
+                _safe = re.sub(r'[^\w\u4e00-\u9fff.-]+', '_', name)[:80] or 'conv'
+                path = os.path.join(tmp_dir, f"{_safe}{ext}")
                 try:
                     ChatLabExporter(conv_name=name, output_format=fmt).export(path)
                     if os.path.exists(path):
@@ -958,14 +965,32 @@ def _do_export(fmt: str, filter_name: str, conversations: list | None):
             if not produced:
                 raise RuntimeError("没有成功导出的会话")
 
-            zip_path = os.path.join(data_dir, "export.zip")
+            file_name = "payload.zip"
+            zip_path = os.path.join(export_dir, file_name)
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
                 for _, path in produced:
                     zf.write(path, arcname=os.path.basename(path))
+            # Clean tmp
+            import shutil
+            shutil.rmtree(tmp_dir, ignore_errors=True)
 
-            _export_state["file_path"] = "export.zip"
+            _export_state["file_path"] = os.path.join(export_id, file_name)
             size_mb = os.path.getsize(zip_path) / (1024 * 1024)
             _export_state["message"] = f"导出完成 ({len(produced)} 个会话, {size_mb:.1f} MB)"
+
+        # Store export metadata in auth DB
+        from common.security_config import get_security_config
+        sec = get_security_config()
+        expire_ts = int(time.time()) + sec.export_ttl_seconds
+        from backend.security.auth_db import create_export_record
+        create_export_record(
+            export_id=export_id,
+            file_name=file_name,
+            expires_at=expire_ts,
+            delete_after_download=sec.export_one_time_download,
+            format=fmt,
+            conversation_count=len(targets),
+        )
 
         _export_state["status"] = "completed"
     except Exception as e:
@@ -975,14 +1000,91 @@ def _do_export(fmt: str, filter_name: str, conversations: list | None):
 
 @control_router.get("/api/export/download")
 async def download_export(session: dict = Depends(require_session)):
-    if not _export_state["file_path"]:
+    export_id = _export_state.get("current_export_id")
+    if not export_id or not _export_state.get("file_path"):
         return JSONResponse({"error": "No export file"}, status_code=404)
-    path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "data", _export_state["file_path"]
+
+    # Check export record
+    from backend.security.auth_db import get_export_record, mark_export_downloaded
+    record = get_export_record(export_id)
+    if not record:
+        return JSONResponse({"error": "Export not found"}, status_code=404)
+
+    # Check expiry
+    if record["expires_at"] < int(time.time()):
+        # Clean up
+        _clean_export_files(export_id)
+        return JSONResponse({"error": "Export expired"}, status_code=410)
+
+    # Check one-time download
+    if record["delete_after_download"] and record["downloaded_at"]:
+        return JSONResponse({"error": "Already downloaded"}, status_code=410)
+
+    file_path = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)),
+        "data", "exports",
+        _export_state["file_path"]
     )
-    if not os.path.exists(path):
+    if not os.path.exists(file_path):
         return JSONResponse({"error": "File not found"}, status_code=404)
-    return FileResponse(path, filename=_export_state["file_path"])
+
+    # Mark as downloaded
+    mark_export_downloaded(export_id)
+
+    from backend.security.audit import log_audit
+    log_audit("EXPORT_DOWNLOADED", actor=session["id"], target_type="export")
+
+    # If one-time download, schedule cleanup
+    if record["delete_after_download"]:
+        asyncio.create_task(_clean_after_download(export_id))
+
+    return FileResponse(
+        file_path,
+        filename=f"douyin-export-{export_id[:8]}{os.path.splitext(record['file_name'])[1]}",
+        headers={
+            "Cache-Control": "no-store",
+            "Pragma": "no-cache",
+            "Content-Disposition": f"attachment",
+            "X-Content-Type-Options": "nosniff",
+        },
+    )
+
+
+def _clean_export_files(export_id: str):
+    """Delete export files from disk and mark as deleted in DB."""
+    import shutil
+    from backend.security.auth_db import mark_export_deleted
+    export_dir = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "exports", export_id
+    )
+    if os.path.isdir(export_dir):
+        shutil.rmtree(export_dir, ignore_errors=True)
+    mark_export_deleted(export_id)
+
+
+async def _clean_after_download(export_id: str):
+    """Background task: delete export after one-time download."""
+    await asyncio.sleep(5)  # Allow response to complete
+    _clean_export_files(export_id)
+
+
+async def _cleanup_expired_exports_loop():
+    """Background task: periodically clean expired exports."""
+    while True:
+        await asyncio.sleep(300)  # Every 5 minutes
+        try:
+            from backend.security.auth_db import get_expired_exports, mark_export_deleted
+            expired = get_expired_exports()
+            for record in expired:
+                export_dir = os.path.join(
+                    os.path.dirname(os.path.dirname(__file__)), "data", "exports", record["id"]
+                )
+                import shutil
+                if os.path.isdir(export_dir):
+                    shutil.rmtree(export_dir, ignore_errors=True)
+                mark_export_deleted(record["id"])
+        except Exception:
+            pass
 
 
 # ── Login (in-container headless with screenshot) ──
