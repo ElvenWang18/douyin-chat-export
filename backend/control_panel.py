@@ -659,7 +659,7 @@ async def _probe_login_state() -> dict:
                 ctx = await pw.chromium.launch_persistent_context(
                     _USER_DATA_DIR, headless=True,
                     viewport={"width": 1400, "height": 900}, locale="zh-CN",
-                    args=["--disable-blink-features=AutomationControlled"],
+                    args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
                 )
                 try:
                     page = ctx.pages[0] if ctx.pages else await ctx.new_page()
@@ -1361,7 +1361,7 @@ async def login_cookie_import(req: CookieImportRequest, session: dict = Depends(
             headless=True,
             viewport={"width": 1400, "height": 900},
             locale="zh-CN",
-            args=["--disable-blink-features=AutomationControlled"],
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         )
         page = ctx.pages[0] if ctx.pages else await ctx.new_page()
         await page.goto("https://www.douyin.com/", wait_until="domcontentloaded")
@@ -1425,7 +1425,7 @@ async def _login_flow():
             headless=True,
             viewport={"width": 1400, "height": 900},
             locale="zh-CN",
-            args=["--disable-blink-features=AutomationControlled"],
+            args=["--disable-blink-features=AutomationControlled", "--no-sandbox", "--disable-dev-shm-usage"],
         )
         _login_state["_context"] = ctx
         await ctx.add_init_script(
